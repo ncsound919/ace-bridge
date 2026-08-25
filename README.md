@@ -37,6 +37,39 @@ Both present → `ALLOW` (LOW-risk content auto-executes). Either missing → he
 in the pending queue with an explicit "awaiting sign-off" reason. Spend/pricing
 actions always follow the normal ACE risk table regardless of sign-off.
 
+## Skill Arsenal integration (`skill_arsenal.py`)
+
+Connects the 103 curated marketing skills registered in
+`.draymond/registry.json` (`coreyhaines31/marketingskills` +
+`msitarzewski/agency-agents`) into the control plane:
+
+- **Provenance** — `propose_content(..., skills_applied=["ab-testing"])`
+  asserts a `marketing_skill.applied` fact per skill into ACE's TMS and
+  chains it into the action's `derived_from`. The observability layer can
+  then answer "which skill licensed this action?"
+- **Fail-closed validation, two layers** — unknown slugs raise at the fact
+  layer (`assert_skill_facts`) or hold the item at the gate layer
+  (`SkillAwareMarketingGate`, default wrapper in `build_bridge`).
+- **Deterministic routing** — `route_skill(problem_text)` keyword-scores
+  registry skill names/descriptions to pick which specialist skill should
+  run a campaign problem. No LLM, reproducible.
+
+```python
+from ace_bridge import build_bridge, propose_content
+from skill_arsenal import route_skill
+
+orch, ex, obs = build_bridge()
+top = route_skill("plan an A/B test for our landing page conversion rate")
+# -> [('ab-testing', 0.45), ('agency-multi-platform-publisher', 0.36), ...]
+
+item = propose_content(orch, action_type="publish_ad", subject="camp_1",
+    agent="growth_optimizer",
+    params={"copy": "...", "voice_approved": True, "format_approved": True},
+    skills_applied=[top[0]["slug"]])
+```
+
+Registry location override: `DRAYMOND_REGISTRY` env var.
+
 ## Usage from fleet agents
 
 ```python

@@ -48,6 +48,13 @@ from ace.observability import ObservabilityLayer  # noqa: E402
 from ace.orchestrator import ACEOrchestrator  # noqa: E402
 from ace.rules import InMemoryRuleEngine, ProposedAction  # noqa: E402
 
+from skill_arsenal import (  # noqa: E402
+    SkillAwareMarketingGate,
+    assert_skill_facts,
+    load_marketing_skills,
+    route_skill,
+)
+
 SMD_BASE_URL = os.environ.get("SMD_BASE_URL", "http://127.0.0.1:8030")
 _BRIDGE_DIR = Path(__file__).resolve().parent
 FALLBACK_OUTBOX = _BRIDGE_DIR / "outbox" / "bridge_outbox.jsonl"
@@ -160,8 +167,13 @@ class MarketingGate(BoundsConstraintGate):
 
 def build_bridge(
     gate: MarketingGate | None = None,
+    skill_aware: bool = True,
 ) -> tuple[ACEOrchestrator, ExecutionLayer, ObservabilityLayer]:
     """Wire one shared ACE control plane for the marketing team.
+
+    With skill_aware=True (default) the gate is wrapped in
+    SkillAwareMarketingGate, which fail-closes any proposal claiming a
+    marketing skill that is not registered in .draymond/registry.json.
 
     Routing:
       publish_blog_post          -> SMD schedule queue (social)
@@ -169,6 +181,8 @@ def build_bridge(
       everything else            -> default file outbox (auditable)
     """
     gate = gate or MarketingGate()
+    if skill_aware:
+        gate = SkillAwareMarketingGate(gate)
     orchestrator = ACEOrchestrator(rule_engine=InMemoryRuleEngine(), constraint_gate=gate)
 
     smd_channel = SMDScheduleChannel()
@@ -201,16 +215,25 @@ def propose_content(
     agent: str,
     params: dict[str, Any],
     supporting_facts: list[Fact] | None = None,
+    skills_applied: list[str] | None = None,
 ) -> Any:
     """One-call proposal path for fleet marketing agents.
 
-    Asserts the agent's supporting facts into the TMS, then submits the
-    proposed action through gate + escalation. Returns the EscalationItem.
+    Asserts the agent's supporting facts into the TMS. With
+    skills_applied, asserts a `marketing_skill.applied` provenance fact
+    per curated skill (validated against the .draymond registry —
+    unknown slugs raise). The claims are also mirrored into params so
+    SkillAwareMarketingGate can fail-closed on them at check time.
+    Returns the EscalationItem.
     """
     fact_ids: list[str] = []
     for fact in supporting_facts or []:
         orch.tms.assert_fact(fact)
         fact_ids.append(fact.fact_id)
+    if skills_applied:
+        facts = assert_skill_facts(orch.tms, subject, skills_applied)
+        fact_ids.extend(f.fact_id for f in facts)
+        params = {**params, "skills_applied": list(skills_applied)}
     action = ProposedAction(
         action_type=action_type,
         subject=subject,
@@ -262,6 +285,55 @@ def selftest() -> int:
         },
         supporting_facts=[voice_fact],
     )
+    # 3. Skill arsenal: route a problem, claim the routed skill.
+    matches = route_skill("plan an A/B test for our landing page conversion rate")
+    print("skill route (ab test):", [(m["slug"], m["score"]) for m in matches])
+    skill_slug = matches[0]["slug"] if matches else None
+    if skill_slug:
+        skilled = propose_content(
+            orch,
+            action_type="publish_ad",
+            subject="campaign_001",
+            agent="growth_optimizer",
+            params={
+                "copy": "Test two landing page variants",
+                "voice_approved": True,
+                "format_approved": True,
+            },
+            skills_applied=[skill_slug],
+        )
+        why = obs.why_did_this_fire(skilled.item_id)
+        print("skilled:", skilled.status.value,
+              "| provenance fact ids:", len(why["licensed_by_facts"]),
+              "(incl. marketing_skill.applied)")
+    # 4a. Unknown skill claim via kwarg -> rejected at the fact layer.
+    try:
+        propose_content(
+            orch,
+            action_type="publish_blog_post",
+            subject="post_bad_skill",
+            agent="voice_keeper",
+            params={"copy": "x", "voice_approved": True, "format_approved": True},
+            skills_applied=["not-a-real-skill"],
+        )
+        bad_skill_status = "submitted"
+    except ValueError as exc:
+        bad_skill_status = f"rejected at fact layer"
+    # 4b. Unknown skill claim smuggled in params -> held at the gate layer.
+    bad_gate_item = propose_content(
+        orch,
+        action_type="publish_blog_post",
+        subject="post_bad_skill_gate",
+        agent="voice_keeper",
+        params={"copy": "x", "skills_applied": ["not-a-real-skill"],
+                "voice_approved": True, "format_approved": True},
+    )
+    bad_gate_status = (
+        "held at gate" if bad_gate_item.status.value == "pending" else
+        bad_gate_item.status.value
+    )
+    print("unknown skill:", bad_skill_status, "/", bad_gate_status)
+
     receipts = ex.drain(orch.escalation_queue)
     print("unsigned:", unsigned.status.value, "-", unsigned.notes)
     print("signed:  ", signed.status.value)
@@ -272,6 +344,8 @@ def selftest() -> int:
         and signed.status.value == "auto_executed"
         and len(receipts) == 1
         and receipts[0].status == "executed"
+        and bad_skill_status == "rejected at fact layer"
+        and bad_gate_status == "held at gate"
     )
     return 0 if ok else 1
 
