@@ -29,7 +29,7 @@ from ace.facts import Fact, FactSource
 REGISTRY_PATH = Path(
     os.environ.get(
         "DRAYMOND_REGISTRY",
-        r"C:\Users\User\Downloads\Uplift\Draymond-Orchestrator\.draymond\registry.json",
+        r"C:\Users\User\Downloads\BUSINESS\_archive\from-uplift\Draymond-Orchestrator\.draymond\registry.json",
     )
 )
 
