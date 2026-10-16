@@ -1,0 +1,15 @@
+# Canonical gitleaks allowlist for the ecosystem baseline audit.
+# Path-scoped ONLY (no blanket value suppression): it silences *fixture* files,
+# which deliberately contain dummy secret patterns, while real secrets in real
+# source are still caught. The baseline runner copies this to a target repo as
+# `.gitleaks.toml` ONLY when the repo has none of its own, and records that it
+# did (reversible).
+[allowlist]
+description = "Ecosystem baseline: fixture files are not leaks"
+paths = [
+  '''(^|/)fixtures?/''',
+  '''(^|/)__fixtures__/''',
+  '''[^/]*parity-fixtures\.[a-z]+$''',
+  '''[^/]*fixtures?\.[a-z]+$''',
+  '''\.fixture\.[a-z]+$''',
+]
